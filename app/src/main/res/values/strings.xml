@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">ScreenShareApp</string>
+    <string name="stream_url">http://&lt;IP&gt;:8080/stream</string>
 </resources>
