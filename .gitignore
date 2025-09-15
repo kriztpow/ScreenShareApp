@@ -1,0 +1,15 @@
+# Archivos comunes a ignorar
+/node_modules/
+/build/
+/dist/
+/.idea/
+/.vscode/
+/.gradle/
+/local.properties
+*.apk
+*.aab
+*.zip
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
