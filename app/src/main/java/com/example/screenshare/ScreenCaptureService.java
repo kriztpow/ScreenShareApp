@@ -3,20 +3,20 @@ package com.example.screenshare;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
-import android.graphics.PixelFormat;
+import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
-import android.os.Handler;
-import android.os.HandlerThread;
 import android.os.IBinder;
-import android.util.Log;
+
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
@@ -24,110 +24,123 @@ import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 
 public class ScreenCaptureService extends Service {
-    public static final String ACTION_STOP = "action_stop";
-    public static final String EXTRA_RESULT_CODE = "result_code";
-    public static final String EXTRA_RESULT_INTENT = "result_intent";
-    private static final String TAG = "ScreenCaptureService";
+
+    private static final String CHANNEL_ID = "ScreenShareChannel";
+    private static final int NOTIFICATION_ID = 1;
 
     private MediaProjection mediaProjection;
+    private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
-    private MediaProjectionManager projectionManager;
-    private HandlerThread handlerThread;
-    private Handler handler;
     private HttpServer server;
 
     @Override
     public void onCreate() {
         super.onCreate();
-        projectionManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+
+        // Crear canal de notificación para Android 8+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID,
+                    "Screen Share Service",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
+        }
+
+        // Notificación obligatoria
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Screen Share")
+                .setContentText("Compartiendo pantalla en la red local")
+                .setSmallIcon(android.R.drawable.ic_menu_camera) // cámbialo por tu icono
+                .setOngoing(true)
+                .build();
+
+        // 👇 Llamada inmediata para evitar crash
+        startForeground(NOTIFICATION_ID, notification);
+
+        // Iniciar servidor HTTP para servir los frames
+        server = new HttpServer(8080);
+        server.start();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            stopSelf();
-            if (server != null) server.stop();
-            stopForeground(true);
-            return START_NOT_STICKY;
-        }
+        int resultCode = intent.getIntExtra("resultCode", -1);
+        Intent data = intent.getParcelableExtra("data");
 
-        int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1);
-        Intent data = intent.getParcelableExtra(EXTRA_RESULT_INTENT);
         if (resultCode != -1 && data != null) {
-            startForegroundServiceWithProjection(resultCode, data);
-        }
-        return START_STICKY;
-    }
+            MediaProjectionManager projectionManager =
+                    (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
 
-    private void startForegroundServiceWithProjection(int resultCode, Intent data) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel("ss_channel", "ScreenShare", NotificationManager.IMPORTANCE_LOW);
-            getSystemService(NotificationManager.class).createNotificationChannel(channel);
-        }
-        Intent notificationIntent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE);
-        Notification notification = new NotificationCompat.Builder(this, "ss_channel")
-                .setContentTitle("ScreenShare")
-                .setContentText("Compartiendo pantalla")
-                .setSmallIcon(android.R.drawable.ic_menu_camera)
-                .setContentIntent(pendingIntent)
-                .build();
+            if (projectionManager != null) {
+                mediaProjection = projectionManager.getMediaProjection(resultCode, data);
 
-        startForeground(1, notification);
+                imageReader = ImageReader.newInstance(720, 1280, PixelFormat.RGBA_8888, 2);
+                virtualDisplay = mediaProjection.createVirtualDisplay(
+                        "ScreenCapture",
+                        720,
+                        1280,
+                        getResources().getDisplayMetrics().densityDpi,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        imageReader.getSurface(),
+                        null,
+                        null
+                );
 
-        mediaProjection = projectionManager.getMediaProjection(resultCode, data);
-        int width = 720;
-        int height = 1280;
-        int density = getResources().getDisplayMetrics().densityDpi;
+                imageReader.setOnImageAvailableListener(reader -> {
+                    Image image = null;
+                    try {
+                        image = reader.acquireLatestImage();
+                        if (image != null) {
+                            Image.Plane[] planes = image.getPlanes();
+                            ByteBuffer buffer = planes[0].getBuffer();
+                            int pixelStride = planes[0].getPixelStride();
+                            int rowStride = planes[0].getRowStride();
+                            int rowPadding = rowStride - pixelStride * 720;
 
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
-        mediaProjection.createVirtualDisplay("ScreenShareDisplay", width, height, density,
-                0, imageReader.getSurface(), null, null);
+                            Bitmap bitmap = Bitmap.createBitmap(
+                                    720 + rowPadding / pixelStride,
+                                    1280,
+                                    Bitmap.Config.ARGB_8888
+                            );
+                            bitmap.copyPixelsFromBuffer(buffer);
 
-        handlerThread = new HandlerThread("ImageReaderThread");
-        handlerThread.start();
-        handler = new Handler(handlerThread.getLooper());
+                            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 50, baos);
+                            byte[] jpeg = baos.toByteArray();
 
-        imageReader.setOnImageAvailableListener(reader -> {
-            Image image = null;
-            try {
-                image = reader.acquireLatestImage();
-                if (image != null) {
-                    Image.Plane[] planes = image.getPlanes();
-                    ByteBuffer buffer = planes[0].getBuffer();
-                    int pixelStride = planes[0].getPixelStride();
-                    int rowStride = planes[0].getRowStride();
-                    int rowPadding = rowStride - pixelStride * width;
+                            // Enviar frame al servidor
+                            server.updateFrame(jpeg);
 
-                    BitmapWrapper bmp = BitmapWrapper.fromImage(image, width, height);
-                    byte[] jpeg = BitmapWrapper.toJpeg(bmp);
-
-                    if (server != null) {
-                        server.updateFrame(jpeg);
+                            bitmap.recycle();
+                        }
+                    } finally {
+                        if (image != null) {
+                            image.close();
+                        }
                     }
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Error processing image: " + e.getMessage());
-            } finally {
-                if (image != null) image.close();
+                }, null);
             }
-        }, handler);
-
-        server = new HttpServer(8080);
-        try {
-            server.start();
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to start server: " + e.getMessage());
         }
+
+        return START_STICKY;
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
-        if (server != null) server.stop();
-        if (mediaProjection != null) mediaProjection.stop();
-        if (imageReader != null) imageReader.close();
-        if (handlerThread != null) handlerThread.quitSafely();
+        if (virtualDisplay != null) {
+            virtualDisplay.release();
+        }
+        if (mediaProjection != null) {
+            mediaProjection.stop();
+        }
+        if (server != null) {
+            server.stop();
+        }
     }
 
     @Nullable
