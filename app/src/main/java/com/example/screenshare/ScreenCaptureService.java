@@ -6,6 +6,7 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.graphics.PixelFormat;
 import android.graphics.ImageFormat;
 import android.media.Image;
 import android.media.ImageReader;
@@ -79,7 +80,7 @@ public class ScreenCaptureService extends Service {
         int height = 1280;
         int density = getResources().getDisplayMetrics().densityDpi;
 
-        imageReader = ImageReader.newInstance(width, height, ImageFormat.RGBA_8888, 2);
+        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
         mediaProjection.createVirtualDisplay("ScreenShareDisplay", width, height, density,
                 0, imageReader.getSurface(), null, null);
 
